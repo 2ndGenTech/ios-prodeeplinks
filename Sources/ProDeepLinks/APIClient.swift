@@ -1,66 +1,102 @@
 import Foundation
 
 enum APIClient {
-    static let baseAPIURL = "https://api.prodeeplinks.com"
-    static let deepLinkEndpointPath = "/custom-deep-link/fingerprint/match"
-    static let analyticsEndpoint = "\(baseAPIURL)/custom-deep-link/track/event"
-    static let defaultTimeout: TimeInterval = 10
+    static let defaultBaseURL = "https://api.prodeeplinks.com"
+    static let maxQueueSize = 1000
+    static let maxBatchSize = 50
+    static let flushIntervalSeconds: TimeInterval = 30
 
-    static func validateLicenseInit(licenseKey: String) async -> (success: Bool, error: String?) {
-        let endpoint = URL(string: "\(baseAPIURL)/custom-deep-link/license/validate")!
-        var request = URLRequest(url: endpoint)
-        request.httpMethod = "POST"
-        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        request.setValue(licenseKey, forHTTPHeaderField: "x-license-key")
-        request.httpBody = try? JSONSerialization.data(withJSONObject: ["licenseKey": licenseKey])
+    private static var queuedMmpEvents: [(apiKey: String, event: MmpEventPayload)] = []
+    private static var flushTask: Task<Void, Never>?
+    private static var currentBaseURL = defaultBaseURL
 
-        do {
-            let (data, response) = try await URLSession.shared.data(for: request)
-            guard let httpResponse = response as? HTTPURLResponse else {
-                return (false, "License validation failed")
-            }
-
-            let decoded = try? JSONDecoder().decode(LicenseValidationAPIResponse.self, from: data)
-
-            if !httpResponse.statusCode.isSuccess {
-                let message = decoded?.message ?? decoded?.error ?? "License validation failed"
-                return (false, message)
-            }
-
-            guard decoded?.success == true, decoded?.valid == true else {
-                let message = decoded?.message ?? decoded?.error ?? "License is not valid"
-                return (false, message)
-            }
-
-            return (true, nil)
-        } catch {
-            return (false, error.localizedDescription)
-        }
+    static func setBaseURL(_ url: String) {
+        currentBaseURL = baseURL(from: url)
     }
+
+    static func baseURL(from override: String?) -> String {
+        let trimmed = (override ?? defaultBaseURL).trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+        return trimmed.isEmpty ? defaultBaseURL : trimmed
+    }
+
+    private static func endpoint(_ path: String, baseURL: String) -> URL? {
+        URL(string: "\(baseURL)\(path)")
+    }
+
+    private static func buildMmpHeaders(apiKey: String) -> [String: String] {
+        [
+            "Accept": "application/json",
+            "Content-Type": "application/json",
+            "Accept-Encoding": "gzip",
+            "x-api-key": apiKey,
+            "X-SDK-Version": EventPayload.sdkVersion,
+            "X-SDK-Platform": "ios",
+        ]
+    }
+
+    private static func logDeprecationHeaders(_ response: HTTPURLResponse) {
+        guard response.value(forHTTPHeaderField: "X-Api-Key-Deprecation") == "true" else { return }
+        let message =
+            response.value(forHTTPHeaderField: "X-Api-Key-Deprecation-Message") ??
+            "You are using a legacy API key. Migrate to pdl_live_pk_* or pdl_test_pk_*."
+        #if DEBUG
+        print("[ProDeepLink]", message)
+        #endif
+    }
+
+    private static func sleep(seconds: UInt64) async {
+        try? await Task.sleep(nanoseconds: seconds * 1_000_000_000)
+    }
+
+    private static func mmpFetch(
+        url: URL,
+        request: URLRequest,
+        maxRetries: Int = 3
+    ) async -> (Data, HTTPURLResponse)? {
+        var delaySeconds: UInt64 = 1
+
+        for attempt in 1...maxRetries {
+            do {
+                let (data, response) = try await URLSession.shared.data(for: request)
+                guard let httpResponse = response as? HTTPURLResponse else { return nil }
+                logDeprecationHeaders(httpResponse)
+
+                if httpResponse.statusCode != 429 || attempt == maxRetries {
+                    return (data, httpResponse)
+                }
+
+                await sleep(seconds: min(delaySeconds, 30))
+                delaySeconds *= 2
+            } catch {
+                if attempt == maxRetries { return nil }
+                await sleep(seconds: delaySeconds)
+                delaySeconds *= 2
+            }
+        }
+
+        return nil
+    }
+
+    // MARK: - Fingerprint match (public, no auth)
 
     static func matchFingerprint(
         payload: FingerprintMatchPayload,
-        baseURL: String = baseAPIURL,
-        licenseKey: String?
+        baseURL: String
     ) async -> FingerprintMatchResponse {
-        let trimmedBase = baseURL.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
-        let endpoint = URL(string: "\(trimmedBase)/custom-deep-link/fingerprint/match")!
+        guard let url = endpoint("/custom-deep-link/fingerprint/match", baseURL: baseURL) else {
+            return FingerprintMatchResponse(error: "Invalid fingerprint endpoint")
+        }
 
-        var request = URLRequest(url: endpoint)
+        var request = URLRequest(url: url)
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        if let licenseKey {
-            request.setValue(licenseKey, forHTTPHeaderField: "x-license-key")
-        }
+        request.setValue("application/json", forHTTPHeaderField: "Accept")
 
         do {
             request.httpBody = try JSONEncoder().encode(payload)
             let (data, response) = try await URLSession.shared.data(for: request)
-
-            if let httpResponse = response as? HTTPURLResponse, httpResponse.statusCode.isSuccess {
-                if let decoded = try? JSONDecoder().decode(FingerprintMatchResponse.self, from: data) {
-                    return decoded
-                }
+            guard let httpResponse = response as? HTTPURLResponse else {
+                return FingerprintMatchResponse(error: "Fingerprint match failed")
             }
 
             if let decoded = try? JSONDecoder().decode(FingerprintMatchResponse.self, from: data) {
@@ -70,185 +106,285 @@ enum APIClient {
             return FingerprintMatchResponse(
                 matched: false,
                 matchConfidence: 0,
-                url: nil,
-                message: nil,
-                error: "Fingerprint match failed"
+                error: "Fingerprint match failed: \(httpResponse.statusCode)"
             )
         } catch {
             return FingerprintMatchResponse(
                 matched: false,
                 matchConfidence: 0,
-                url: nil,
-                message: nil,
                 error: error.localizedDescription
             )
         }
     }
 
-    static func fetchDeepLinkURL(
-        licenseKey: String,
-        fingerprint: DeviceFingerprint,
-        apiEndpoint: String? = nil,
-        timeout: TimeInterval = defaultTimeout
-    ) async -> DeepLinkResponse {
-        let validation = LicenseValidator.validateFormat(licenseKey)
-        if !validation.isValid {
-            return DeepLinkResponse(success: false, error: validation.message ?? "Invalid license key")
+    // MARK: - MMP events
+
+    static func postMmpEvent(
+        apiKey: String,
+        event: MmpEventPayload,
+        baseURL: String
+    ) async -> MmpEventResponse {
+        guard let url = endpoint("/v1/mmp/events", baseURL: baseURL) else {
+            return MmpEventResponse(success: false, error: "Invalid MMP events endpoint")
         }
 
-        let trimmedBase = (apiEndpoint ?? baseAPIURL).trimmingCharacters(in: CharacterSet(charactersIn: "/"))
-        let endpointPath = trimmedBase.contains("/custom-deep-link/")
-            ? trimmedBase
-            : "\(trimmedBase)\(deepLinkEndpointPath)"
-
-        guard let endpoint = URL(string: endpointPath) else {
-            return DeepLinkResponse(success: false, error: "Invalid API endpoint")
-        }
-
-        let payload: [String: Any] = [
-            "licenseKey": licenseKey,
-            "fingerprint": fingerprintDictionary(from: fingerprint),
-            "timestamp": Int(Date().timeIntervalSince1970 * 1000),
-        ]
-
-        var request = URLRequest(url: endpoint)
+        var request = URLRequest(url: url)
         request.httpMethod = "POST"
-        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        request.setValue(licenseKey, forHTTPHeaderField: "x-license-key")
-        request.timeoutInterval = timeout
-
-        do {
-            request.httpBody = try JSONSerialization.data(withJSONObject: payload)
-            let (data, response) = try await URLSession.shared.data(for: request)
-
-            guard let httpResponse = response as? HTTPURLResponse else {
-                return DeepLinkResponse(success: false, error: "Invalid response")
-            }
-
-            guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
-                return DeepLinkResponse(success: false, error: "API error: \(httpResponse.statusCode)")
-            }
-
-            if !httpResponse.statusCode.isSuccess {
-                let message = json["message"] as? String ?? "API error: \(httpResponse.statusCode)"
-                return DeepLinkResponse(success: false, error: message)
-            }
-
-            let success = json["success"] as? Bool ?? false
-            if success {
-                if let url = json["url"] as? String {
-                    return DeepLinkResponse(
-                        success: true,
-                        url: url,
-                        message: json["message"] as? String
-                    )
-                }
-                return DeepLinkResponse(
-                    success: true,
-                    url: nil,
-                    message: json["message"] as? String ?? "No deep link available"
-                )
-            }
-
-            return DeepLinkResponse(
-                success: false,
-                error: json["message"] as? String ?? "No URL returned from API"
-            )
-        } catch {
-            if (error as NSError).code == NSURLErrorTimedOut {
-                return DeepLinkResponse(success: false, error: "Request timeout")
-            }
-            return DeepLinkResponse(success: false, error: error.localizedDescription)
-        }
-    }
-
-    static func fetchDeepLinkURLWithRetry(
-        licenseKey: String,
-        fingerprint: DeviceFingerprint,
-        retryAttempts: Int = 3,
-        apiEndpoint: String? = nil,
-        timeout: TimeInterval = defaultTimeout
-    ) async -> DeepLinkResponse {
-        var lastError: DeepLinkResponse?
-
-        for attempt in 1...retryAttempts {
-            let result = await fetchDeepLinkURL(
-                licenseKey: licenseKey,
-                fingerprint: fingerprint,
-                apiEndpoint: apiEndpoint,
-                timeout: timeout
-            )
-
-            if result.success {
-                return result
-            }
-
-            lastError = result
-
-            if let error = result.error?.lowercased(),
-               error.contains("license") || error.contains("invalid") {
-                return result
-            }
-
-            if attempt < retryAttempts {
-                let delay = UInt64(attempt) * 1_000_000_000
-                try? await Task.sleep(nanoseconds: delay)
-            }
-        }
-
-        return lastError ?? DeepLinkResponse(success: false, error: "Failed after retries")
-    }
-
-    static func trackCustomDeepLinkEvent(
-        event: CustomDeepLinkAnalyticsEvent,
-        licenseKey: String?
-    ) async -> [String: Any] {
-        guard let endpoint = URL(string: analyticsEndpoint) else {
-            return ["success": false, "error": "Invalid analytics endpoint"]
-        }
-
-        var request = URLRequest(url: endpoint)
-        request.httpMethod = "POST"
-        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        if let licenseKey {
-            request.setValue(licenseKey, forHTTPHeaderField: "x-license-key")
+        for (key, value) in buildMmpHeaders(apiKey: apiKey) {
+            request.setValue(value, forHTTPHeaderField: key)
         }
 
         do {
             request.httpBody = try JSONEncoder().encode(event)
-            let (data, _) = try await URLSession.shared.data(for: request)
-            if let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
-                return json
+            guard let (data, httpResponse) = await mmpFetch(url: url, request: request) else {
+                return MmpEventResponse(success: false, error: "MMP event request failed")
             }
-            return ["success": true]
+
+            let decoded = try? JSONDecoder().decode(MmpEventAPIResponse.self, from: data)
+
+            if !httpResponse.statusCode.isSuccess {
+                let message = decoded?.message ?? decoded?.error ?? "MMP event failed: \(httpResponse.statusCode)"
+                return MmpEventResponse(success: false, error: message)
+            }
+
+            return MmpEventResponse(
+                success: decoded?.success ?? true,
+                eventId: decoded?.eventId,
+                sessionId: decoded?.sessionId,
+                resolvedEventType: decoded?.resolvedEventType,
+                attributionType: decoded?.attributionType,
+                source: decoded?.source,
+                campaign: decoded?.campaign
+            )
         } catch {
-            return ["success": false, "error": error.localizedDescription]
+            return MmpEventResponse(success: false, error: error.localizedDescription)
         }
     }
 
-    private static func fingerprintDictionary(from fingerprint: DeviceFingerprint) -> [String: Any] {
-        var dict: [String: Any] = [
-            "platform": fingerprint.platform,
-            "osVersion": fingerprint.osVersion,
-            "deviceId": fingerprint.deviceId,
-            "deviceModel": fingerprint.deviceModel,
-            "screenResolution": fingerprint.screenResolution,
-            "screenWidth": fingerprint.screenWidth,
-            "screenHeight": fingerprint.screenHeight,
-            "appVersion": fingerprint.appVersion,
-        ]
+    static func postMmpEventBatch(
+        apiKey: String,
+        events: [MmpEventPayload],
+        baseURL: String
+    ) async -> MmpBatchResponse {
+        if events.isEmpty {
+            return MmpBatchResponse(success: true, count: 0)
+        }
 
-        if let manufacturer = fingerprint.manufacturer { dict["manufacturer"] = manufacturer }
-        if let timezone = fingerprint.timezone { dict["timezone"] = timezone }
-        if let language = fingerprint.language { dict["language"] = language }
-        if let locale = fingerprint.locale { dict["locale"] = locale }
-        if let carrier = fingerprint.carrier { dict["carrier"] = carrier }
-        if let connectionType = fingerprint.connectionType { dict["connectionType"] = connectionType }
-        if let isSimulator = fingerprint.isSimulator { dict["isSimulator"] = isSimulator }
-        if let isRooted = fingerprint.isRooted { dict["isRooted"] = isRooted }
-        if let ipAddress = fingerprint.ipAddress { dict["ipAddress"] = ipAddress }
+        guard let url = endpoint("/v1/mmp/events/batch", baseURL: baseURL) else {
+            return MmpBatchResponse(success: false, error: "Invalid MMP batch endpoint")
+        }
 
-        return dict
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        for (key, value) in buildMmpHeaders(apiKey: apiKey) {
+            request.setValue(value, forHTTPHeaderField: key)
+        }
+
+        struct BatchBody: Encodable {
+            let events: [MmpEventPayload]
+        }
+
+        do {
+            request.httpBody = try JSONEncoder().encode(BatchBody(events: events))
+            guard let (data, httpResponse) = await mmpFetch(url: url, request: request) else {
+                return MmpBatchResponse(success: false, error: "MMP batch request failed")
+            }
+
+            var decoded = (try? JSONDecoder().decode(MmpBatchResponse.self, from: data))
+
+            if !httpResponse.statusCode.isSuccess {
+                let message = decoded?.message ?? decoded?.error ?? "MMP batch failed: \(httpResponse.statusCode)"
+                return MmpBatchResponse(success: false, error: message)
+            }
+
+            if decoded == nil {
+                decoded = MmpBatchResponse(success: true, count: events.count)
+            }
+
+            return decoded ?? MmpBatchResponse(success: true, count: events.count)
+        } catch {
+            return MmpBatchResponse(success: false, error: error.localizedDescription)
+        }
+    }
+
+    static func postConversion(
+        apiKey: String,
+        payload: MmpConversionPayload,
+        baseURL: String
+    ) async -> MmpConversionResponse {
+        guard let url = endpoint("/v1/mmp/conversions", baseURL: baseURL) else {
+            return MmpConversionResponse(success: false, error: "Invalid conversions endpoint")
+        }
+
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        for (key, value) in buildMmpHeaders(apiKey: apiKey) {
+            request.setValue(value, forHTTPHeaderField: key)
+        }
+
+        struct ConversionAPIResponse: Decodable {
+            let success: Bool?
+            let conversionId: String?
+            let attribution: MmpAttributionResult?
+            let message: String?
+            let error: String?
+        }
+
+        do {
+            request.httpBody = try JSONEncoder().encode(payload)
+            guard let (data, httpResponse) = await mmpFetch(url: url, request: request) else {
+                return MmpConversionResponse(success: false, error: "Conversion request failed")
+            }
+
+            let decoded = try? JSONDecoder().decode(ConversionAPIResponse.self, from: data)
+
+            if !httpResponse.statusCode.isSuccess {
+                let message = decoded?.message ?? decoded?.error ?? "Conversion failed: \(httpResponse.statusCode)"
+                return MmpConversionResponse(success: false, error: message)
+            }
+
+            return MmpConversionResponse(
+                success: decoded?.success ?? true,
+                conversionId: decoded?.conversionId,
+                attribution: decoded?.attribution
+            )
+        } catch {
+            return MmpConversionResponse(success: false, error: error.localizedDescription)
+        }
+    }
+
+    static func fetchAttribution(
+        apiKey: String,
+        conversionId: String,
+        baseURL: String
+    ) async -> MmpAttributionResponse {
+        guard let url = endpoint("/v1/mmp/attribution/\(conversionId)", baseURL: baseURL) else {
+            return MmpAttributionResponse(success: false, error: "Invalid attribution endpoint")
+        }
+
+        var request = URLRequest(url: url)
+        request.httpMethod = "GET"
+        for (key, value) in buildMmpHeaders(apiKey: apiKey) {
+            request.setValue(value, forHTTPHeaderField: key)
+        }
+
+        struct AttributionAPIResponse: Decodable {
+            let success: Bool?
+            let attributions: MmpAttributionResult?
+            let message: String?
+            let error: String?
+        }
+
+        do {
+            guard let (data, httpResponse) = await mmpFetch(url: url, request: request) else {
+                return MmpAttributionResponse(success: false, error: "Attribution request failed")
+            }
+
+            let decoded = try? JSONDecoder().decode(AttributionAPIResponse.self, from: data)
+
+            if !httpResponse.statusCode.isSuccess {
+                let message = decoded?.message ?? decoded?.error ?? "Attribution fetch failed: \(httpResponse.statusCode)"
+                return MmpAttributionResponse(success: false, error: message)
+            }
+
+            return MmpAttributionResponse(
+                success: decoded?.success ?? true,
+                attributions: decoded?.attributions
+            )
+        } catch {
+            return MmpAttributionResponse(success: false, error: error.localizedDescription)
+        }
+    }
+
+    static func fetchAttributionWithRetry(
+        apiKey: String,
+        conversionId: String,
+        baseURL: String,
+        maxRetries: Int = 3
+    ) async -> MmpAttributionResponse {
+        var last = MmpAttributionResponse(success: false, error: "Unknown error")
+
+        for attempt in 1...maxRetries {
+            last = await fetchAttribution(apiKey: apiKey, conversionId: conversionId, baseURL: baseURL)
+            if last.success, last.attributions != nil {
+                return last
+            }
+            if attempt < maxRetries {
+                await sleep(seconds: 2)
+            }
+        }
+
+        return last
+    }
+
+    // MARK: - Event queue
+
+    static func enqueueMmpEvent(_ event: MmpEventPayload, apiKey: String) {
+        if queuedMmpEvents.count >= maxQueueSize {
+            queuedMmpEvents.removeFirst()
+        }
+        queuedMmpEvents.append((apiKey: apiKey, event: event))
+        ensureFlushTimer()
+        if queuedMmpEvents.count >= maxBatchSize {
+            Task { _ = await flushMmpEvents(baseURL: currentBaseURL) }
+        }
+    }
+
+    static func ensureFlushTimer() {
+        guard flushTask == nil else { return }
+        flushTask = Task {
+            while !Task.isCancelled {
+                try? await Task.sleep(nanoseconds: UInt64(flushIntervalSeconds * 1_000_000_000))
+                _ = await flushMmpEvents(baseURL: currentBaseURL)
+            }
+        }
+    }
+
+    static func flushMmpEvents(baseURL: String) async -> FlushResult {
+        if queuedMmpEvents.isEmpty {
+            return FlushResult(success: true, count: 0)
+        }
+
+        guard let firstKey = queuedMmpEvents.first?.apiKey else {
+            return FlushResult(success: false, error: "Missing API key in queue")
+        }
+
+        var batchItems: [(apiKey: String, event: MmpEventPayload)] = []
+        var remaining: [(apiKey: String, event: MmpEventPayload)] = []
+
+        for item in queuedMmpEvents {
+            if batchItems.count < maxBatchSize, item.apiKey == firstKey {
+                batchItems.append(item)
+            } else {
+                remaining.append(item)
+            }
+        }
+
+        queuedMmpEvents = remaining
+
+        let result = await postMmpEventBatch(
+            apiKey: firstKey,
+            events: batchItems.map(\.event),
+            baseURL: baseURL
+        )
+
+        if result.success != true {
+            queuedMmpEvents = batchItems + queuedMmpEvents
+            return FlushResult(success: false, error: result.error)
+        }
+
+        return FlushResult(
+            success: true,
+            count: result.count ?? batchItems.count,
+            sessionId: result.sessionId
+        )
+    }
+
+    static func resetQueue() {
+        flushTask?.cancel()
+        flushTask = nil
+        queuedMmpEvents.removeAll()
+        currentBaseURL = defaultBaseURL
     }
 }
 

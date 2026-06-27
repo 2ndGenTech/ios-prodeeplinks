@@ -44,7 +44,10 @@ enum FingerprintCollector {
         )
     }
 
-    static func buildMatchPayload(from fingerprint: DeviceFingerprint) -> FingerprintMatchPayload {
+    static func buildMatchPayload(
+        from fingerprint: DeviceFingerprint,
+        customerUserId: String? = nil
+    ) -> FingerprintMatchPayload {
         FingerprintMatchPayload(
             basic: FingerprintBasicPayload(
                 userAgent: "",
@@ -63,7 +66,8 @@ enum FingerprintCollector {
                 osVersion: fingerprint.osVersion,
                 appVersion: fingerprint.appVersion
             ),
-            userId: nil
+            customerUserId: customerUserId,
+            userId: customerUserId
         )
     }
 

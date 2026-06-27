@@ -3,17 +3,35 @@ import Foundation
 // MARK: - Configuration
 
 public struct InitConfig: Sendable {
-    public let licenseKey: String
+    /// Preferred — publishable API key (`pdl_live_pk_*` / `pdl_test_pk_*`)
+    public let apiKey: String?
+    /// Deprecated alias for `apiKey`
+    public let licenseKey: String?
     public let apiBaseUrl: String?
     public let apiPrefix: String?
     public let domain: String?
 
+    public init(
+        apiKey: String,
+        apiBaseUrl: String? = nil,
+        apiPrefix: String? = nil,
+        domain: String? = nil
+    ) {
+        self.apiKey = apiKey
+        self.licenseKey = nil
+        self.apiBaseUrl = apiBaseUrl
+        self.apiPrefix = apiPrefix
+        self.domain = domain
+    }
+
+    /// Deprecated — use `init(apiKey:)` instead.
     public init(
         licenseKey: String,
         apiBaseUrl: String? = nil,
         apiPrefix: String? = nil,
         domain: String? = nil
     ) {
+        self.apiKey = nil
         self.licenseKey = licenseKey
         self.apiBaseUrl = apiBaseUrl
         self.apiPrefix = apiPrefix
@@ -57,6 +75,51 @@ public struct LicenseValidationResult: Sendable {
     }
 }
 
+public struct AnalyticsTrackResult: Sendable {
+    public let success: Bool
+    public let queued: Bool?
+    public let error: String?
+
+    public init(success: Bool, queued: Bool? = nil, error: String? = nil) {
+        self.success = success
+        self.queued = queued
+        self.error = error
+    }
+}
+
+public struct FlushResult: Sendable {
+    public let success: Bool
+    public let count: Int?
+    public let sessionId: String?
+    public let error: String?
+
+    public init(success: Bool, count: Int? = nil, sessionId: String? = nil, error: String? = nil) {
+        self.success = success
+        self.count = count
+        self.sessionId = sessionId
+        self.error = error
+    }
+}
+
+public struct TrackPurchaseResult: Sendable {
+    public let success: Bool
+    public let event: MmpEventResponse?
+    public let conversion: MmpConversionResponse?
+    public let error: String?
+
+    public init(
+        success: Bool,
+        event: MmpEventResponse? = nil,
+        conversion: MmpConversionResponse? = nil,
+        error: String? = nil
+    ) {
+        self.success = success
+        self.event = event
+        self.conversion = conversion
+        self.error = error
+    }
+}
+
 // MARK: - Device Fingerprint
 
 public struct DeviceFingerprint: Sendable, Codable {
@@ -77,6 +140,39 @@ public struct DeviceFingerprint: Sendable, Codable {
     public let isSimulator: Bool?
     public let isRooted: Bool?
     public let ipAddress: String?
+}
+
+// MARK: - Attribution
+
+public struct DeepLinkAttributionParams: Sendable {
+    public var clickId: String?
+    public var pdlSessionId: String?
+    public var shortCode: String?
+    public var utmSource: String?
+    public var utmMedium: String?
+    public var utmCampaign: String?
+    public var utmContent: String?
+    public var utmTerm: String?
+
+    public init(
+        clickId: String? = nil,
+        pdlSessionId: String? = nil,
+        shortCode: String? = nil,
+        utmSource: String? = nil,
+        utmMedium: String? = nil,
+        utmCampaign: String? = nil,
+        utmContent: String? = nil,
+        utmTerm: String? = nil
+    ) {
+        self.clickId = clickId
+        self.pdlSessionId = pdlSessionId
+        self.shortCode = shortCode
+        self.utmSource = utmSource
+        self.utmMedium = utmMedium
+        self.utmCampaign = utmCampaign
+        self.utmContent = utmContent
+        self.utmTerm = utmTerm
+    }
 }
 
 // MARK: - API Payloads
@@ -105,32 +201,137 @@ struct FingerprintMatchPayload: Codable {
     let basic: FingerprintBasicPayload
     let network: FingerprintNetworkPayload
     let device: FingerprintDevicePayload
+    let customerUserId: String?
     let userId: String?
+
+    init(
+        basic: FingerprintBasicPayload,
+        network: FingerprintNetworkPayload,
+        device: FingerprintDevicePayload,
+        customerUserId: String? = nil,
+        userId: String? = nil
+    ) {
+        self.basic = basic
+        self.network = network
+        self.device = device
+        self.customerUserId = customerUserId
+        self.userId = userId
+    }
+}
+
+public struct MmpEventPayload: Codable, Sendable {
+    public var eventType: String
+    public var deviceId: String
+    public var platform: String
+    public var sessionId: String?
+    public var userId: String?
+    public var customerUserId: String?
+    public var clickId: String?
+    public var pdlSessionId: String?
+    public var source: String?
+    public var medium: String?
+    public var campaign: String?
+    public var utmSource: String?
+    public var utmMedium: String?
+    public var utmCampaign: String?
+    public var utmContent: String?
+    public var utmTerm: String?
+    public var osVersion: String?
+    public var deviceModel: String?
+    public var screenSize: String?
+    public var carrier: String?
+    public var networkType: String?
+    public var language: String?
+    public var timezone: String?
+    public var appVersion: String?
+    public var sdkVersion: String?
+    public var revenue: Double?
+    public var currency: String?
+    public var shortCode: String?
+    public var properties: [String: AnyCodable]?
+    public var timestamp: String?
+}
+
+public struct MmpConversionPayload: Codable, Sendable {
+    public var conversionType: String
+    public var deviceId: String
+    public var platform: String
+    public var sessionId: String?
+    public var userId: String?
+    public var timestamp: String?
+    public var revenue: Double?
+    public var currency: String?
+    public var orderId: String?
+    public var productId: String?
+    public var productName: String?
+    public var category: String?
+    public var quantity: Int?
+    public var properties: [String: AnyCodable]?
+}
+
+public struct TrackPurchasePayload: Sendable {
+    public let conversionType: String?
+    public let revenue: Double
+    public let currency: String?
+    public let orderId: String?
+    public let productId: String?
+    public let productName: String?
+    public let category: String?
+    public let quantity: Int?
+    public let properties: [String: AnyCodable]?
+
+    public init(
+        revenue: Double,
+        currency: String? = nil,
+        orderId: String? = nil,
+        productId: String? = nil,
+        productName: String? = nil,
+        category: String? = nil,
+        quantity: Int? = nil,
+        conversionType: String? = nil,
+        properties: [String: AnyCodable]? = nil
+    ) {
+        self.revenue = revenue
+        self.currency = currency
+        self.orderId = orderId
+        self.productId = productId
+        self.productName = productName
+        self.category = category
+        self.quantity = quantity
+        self.conversionType = conversionType
+        self.properties = properties
+    }
 }
 
 public struct CustomDeepLinkAnalyticsEvent: Codable, Sendable {
     public var eventType: String
-    public var eventName: String
+    public var eventName: String?
     public var category: String?
     public var action: String?
     public var label: String?
     public var value: Double?
     public var properties: [String: AnyCodable]?
     public var sessionId: String?
+    public var customerUserId: String?
     public var userId: String?
+    public var revenue: Double?
+    public var currency: String?
     public var pageUrl: String?
     public var pageTitle: String?
 
     public init(
         eventType: String,
-        eventName: String,
+        eventName: String? = nil,
         category: String? = nil,
         action: String? = nil,
         label: String? = nil,
         value: Double? = nil,
         properties: [String: AnyCodable]? = nil,
         sessionId: String? = nil,
+        customerUserId: String? = nil,
         userId: String? = nil,
+        revenue: Double? = nil,
+        currency: String? = nil,
         pageUrl: String? = nil,
         pageTitle: String? = nil
     ) {
@@ -142,7 +343,10 @@ public struct CustomDeepLinkAnalyticsEvent: Codable, Sendable {
         self.value = value
         self.properties = properties
         self.sessionId = sessionId
+        self.customerUserId = customerUserId
         self.userId = userId
+        self.revenue = revenue
+        self.currency = currency
         self.pageUrl = pageUrl
         self.pageTitle = pageTitle
     }
@@ -150,16 +354,11 @@ public struct CustomDeepLinkAnalyticsEvent: Codable, Sendable {
 
 // MARK: - API Responses
 
-struct LicenseValidationAPIResponse: Decodable {
-    let success: Bool?
-    let valid: Bool?
-    let message: String?
-    let error: String?
-}
-
 struct FingerprintMatchResponse: Decodable {
     let matched: Bool?
     let matchConfidence: Double?
+    let clickId: String?
+    let pdlSessionId: String?
     let url: String?
     let message: String?
     let error: String?
@@ -167,21 +366,147 @@ struct FingerprintMatchResponse: Decodable {
     init(
         matched: Bool? = nil,
         matchConfidence: Double? = nil,
+        clickId: String? = nil,
+        pdlSessionId: String? = nil,
         url: String? = nil,
         message: String? = nil,
         error: String? = nil
     ) {
         self.matched = matched
         self.matchConfidence = matchConfidence
+        self.clickId = clickId
+        self.pdlSessionId = pdlSessionId
         self.url = url
         self.message = message
         self.error = error
     }
 }
 
-struct AnalyticsAPIResponse: Decodable {
+public struct MmpEventResponse: Sendable {
+    public let success: Bool
+    public let eventId: String?
+    public let sessionId: String?
+    public let resolvedEventType: String?
+    public let attributionType: String?
+    public let source: String?
+    public let campaign: String?
+    public let error: String?
+
+    public init(
+        success: Bool,
+        eventId: String? = nil,
+        sessionId: String? = nil,
+        resolvedEventType: String? = nil,
+        attributionType: String? = nil,
+        source: String? = nil,
+        campaign: String? = nil,
+        error: String? = nil
+    ) {
+        self.success = success
+        self.eventId = eventId
+        self.sessionId = sessionId
+        self.resolvedEventType = resolvedEventType
+        self.attributionType = attributionType
+        self.source = source
+        self.campaign = campaign
+        self.error = error
+    }
+}
+
+struct MmpBatchResponse: Decodable {
     let success: Bool?
+    let count: Int?
+    let sessionId: String?
+    let resolvedEventType: String?
+    let attributionType: String?
+    let source: String?
+    let campaign: String?
+    let eventIds: [String]?
+    let message: String?
     let error: String?
+
+    init(
+        success: Bool? = nil,
+        count: Int? = nil,
+        sessionId: String? = nil,
+        resolvedEventType: String? = nil,
+        attributionType: String? = nil,
+        source: String? = nil,
+        campaign: String? = nil,
+        eventIds: [String]? = nil,
+        message: String? = nil,
+        error: String? = nil
+    ) {
+        self.success = success
+        self.count = count
+        self.sessionId = sessionId
+        self.resolvedEventType = resolvedEventType
+        self.attributionType = attributionType
+        self.source = source
+        self.campaign = campaign
+        self.eventIds = eventIds
+        self.message = message
+        self.error = error
+    }
+}
+
+struct MmpEventAPIResponse: Decodable {
+    let success: Bool?
+    let eventId: String?
+    let sessionId: String?
+    let resolvedEventType: String?
+    let attributionType: String?
+    let source: String?
+    let campaign: String?
+    let message: String?
+    let error: String?
+}
+
+public struct MmpAttributionTouchpoint: Sendable, Codable {
+    public let source: String
+    public let campaign: String?
+    public let timestamp: String
+    public let weight: Double
+}
+
+public struct MmpAttributionResult: Sendable, Codable {
+    public let conversionId: String
+    public let attributedSource: String?
+    public let attributedCampaign: String?
+    public let attributedRevenue: Double?
+    public let model: String?
+    public let touchpoints: [MmpAttributionTouchpoint]?
+}
+
+public struct MmpConversionResponse: Sendable {
+    public let success: Bool
+    public let conversionId: String?
+    public let attribution: MmpAttributionResult?
+    public let error: String?
+
+    public init(
+        success: Bool,
+        conversionId: String? = nil,
+        attribution: MmpAttributionResult? = nil,
+        error: String? = nil
+    ) {
+        self.success = success
+        self.conversionId = conversionId
+        self.attribution = attribution
+        self.error = error
+    }
+}
+
+public struct MmpAttributionResponse: Sendable {
+    public let success: Bool
+    public let attributions: MmpAttributionResult?
+    public let error: String?
+
+    public init(success: Bool, attributions: MmpAttributionResult? = nil, error: String? = nil) {
+        self.success = success
+        self.attributions = attributions
+        self.error = error
+    }
 }
 
 // MARK: - AnyCodable helper for analytics properties
